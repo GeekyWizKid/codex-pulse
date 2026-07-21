@@ -120,7 +120,9 @@ final class AppStore: ObservableObject {
     }
 
     var radarMetadata: String {
-        guard let metadata = radarSnapshot?.metadata else { return "等待 CodexRadar" }
+        guard let metadata = radarSnapshot?.metadata else {
+            return usage.models.isEmpty ? "等待 CodexRadar" : "\(usage.models.count) 个组合 · 公共榜单"
+        }
         return "\(metadata.taskCount) 项任务 · \(metadata.comboCount) 个组合 · \(metadata.onlineVolunteers) 位在线志愿者"
     }
 
