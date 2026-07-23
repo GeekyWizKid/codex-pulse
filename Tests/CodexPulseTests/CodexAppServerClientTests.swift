@@ -3,6 +3,101 @@ import XCTest
 @testable import CodexPulse
 
 final class CodexAppServerClientTests: XCTestCase {
+    func testResolverPrefersPackagedNativeCodexWhenGUIPathCannotFindNode() throws {
+        let fileManager = FileManager.default
+        let temporaryHome = fileManager.temporaryDirectory
+            .appendingPathComponent("CodexPulseResolverTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporaryHome) }
+
+        let launcher = temporaryHome.appendingPathComponent(".npm-global/bin/codex")
+        let packageRoot = temporaryHome
+            .appendingPathComponent(".npm-global/lib/node_modules/@openai/codex", isDirectory: true)
+        let nodeLauncher = packageRoot.appendingPathComponent("bin/codex.js")
+
+        #if arch(arm64)
+        let packageName = "codex-darwin-arm64"
+        let targetTriple = "aarch64-apple-darwin"
+        #elseif arch(x86_64)
+        let packageName = "codex-darwin-x64"
+        let targetTriple = "x86_64-apple-darwin"
+        #else
+        throw XCTSkip("Codex currently ships native macOS packages for arm64 and x86_64")
+        #endif
+
+        let nativeExecutable = packageRoot
+            .appendingPathComponent("node_modules/@openai/\(packageName)")
+            .appendingPathComponent("vendor/\(targetTriple)/bin/codex")
+
+        try fileManager.createDirectory(
+            at: launcher.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: nodeLauncher.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: nativeExecutable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/usr/bin/env node\n".utf8).write(to: nodeLauncher)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: nativeExecutable)
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: nodeLauncher.path
+        )
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: nativeExecutable.path
+        )
+        try fileManager.createSymbolicLink(at: launcher, withDestinationURL: nodeLauncher)
+
+        let resolver = DefaultCodexExecutableResolver(
+            environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"],
+            homeDirectory: temporaryHome
+        )
+
+        XCTAssertEqual(
+            try resolver.resolveCodexExecutable(),
+            nativeExecutable.standardizedFileURL.resolvingSymlinksInPath()
+        )
+    }
+
+    func testResolverFallsBackToExecutableWhenNoPackagedNativeBinaryExists() throws {
+        let fileManager = FileManager.default
+        let temporaryHome = fileManager.temporaryDirectory
+            .appendingPathComponent("CodexPulseResolverTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporaryHome) }
+
+        let launcher = temporaryHome.appendingPathComponent(".npm-global/bin/codex")
+        let nodeLauncher = temporaryHome
+            .appendingPathComponent(".npm-global/lib/node_modules/@openai/codex/bin/codex.js")
+        try fileManager.createDirectory(
+            at: launcher.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: nodeLauncher.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/usr/bin/env node\n".utf8).write(to: nodeLauncher)
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: nodeLauncher.path
+        )
+        try fileManager.createSymbolicLink(at: launcher, withDestinationURL: nodeLauncher)
+
+        let resolver = DefaultCodexExecutableResolver(
+            environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"],
+            homeDirectory: temporaryHome
+        )
+
+        XCTAssertEqual(
+            try resolver.resolveCodexExecutable(),
+            nodeLauncher.standardizedFileURL.resolvingSymlinksInPath()
+        )
+    }
+
     @MainActor
     func testHandshakeAndRefreshUseStableWireMethodsAndDecodeFixtures() async throws {
         let transport = FixtureTransport(mode: .successful)
