@@ -3,7 +3,7 @@ import SwiftUI
 struct ProjectsView: View {
     @ObservedObject var store: AppStore
     @State private var searchText = ""
-    @State private var selectedProjectID: String?
+    @State private var selectedProjectID: DashboardProject.ID?
 
     private var filteredProjects: [DashboardProject] {
         guard !searchText.isEmpty else { return store.usage.projects }
@@ -14,239 +14,376 @@ struct ProjectsView: View {
     }
 
     private var selectedProject: DashboardProject? {
-        let requested = selectedProjectID.flatMap { id in
+        selectedProjectID.flatMap { id in
             filteredProjects.first(where: { $0.id == id })
         }
-        return requested ?? filteredProjects.first
+    }
+
+    private var visibleTokens: Int {
+        filteredProjects.reduce(0) { $0 + $1.tokens }
+    }
+
+    private var visibleActiveDuration: TimeInterval {
+        filteredProjects.reduce(0) { $0 + $1.activeDuration }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("项目")
-                        .font(.system(size: 30, weight: .bold))
-                    Text("Token、会话和活跃时长均来自本地 Codex 记录")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                summaryBadge("\(store.usage.projects.count)", label: "项目")
-                summaryBadge(PulseFormatters.tokens(store.usage.tokens), label: "Tokens")
-                summaryBadge(PulseFormatters.duration(store.usage.activeDuration), label: "活跃")
-            }
+        VStack(alignment: .leading, spacing: 0) {
+            pageHeader
+            Divider()
 
-            HStack(alignment: .top, spacing: 12) {
-                PulsePanel {
+            GeometryReader { proxy in
+                if proxy.size.width >= 860 {
+                    HSplitView {
+                        projectList
+                            .frame(minWidth: 520)
+
+                        ProjectInspector(project: selectedProject)
+                            .frame(minWidth: 270, idealWidth: 320, maxWidth: 390)
+                    }
+                } else {
                     VStack(spacing: 0) {
-                        projectHeader
-                        Divider().opacity(0.5)
-
-                        if filteredProjects.isEmpty {
-                            ContentUnavailableView.search(text: searchText)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else {
-                            ScrollView {
-                                LazyVStack(spacing: 0) {
-                                    ForEach(filteredProjects) { project in
-                                        projectButton(project)
-                                        Divider().opacity(0.35).padding(.leading, 18)
-                                    }
-                                }
-                            }
-                        }
+                        projectList
+                        Divider()
+                        ProjectInspector(project: selectedProject, compact: true)
+                            .frame(minHeight: 210, idealHeight: 250, maxHeight: 300)
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                ProjectInspector(project: selectedProject)
-                    .frame(width: 330)
             }
         }
-        .padding(22)
-        .background(PulseTheme.detailBackground)
         .searchable(text: $searchText, prompt: "搜索项目或模型")
+        .onChange(of: filteredProjects.map(\.id), initial: true) { _, ids in
+            if let selectedProjectID, ids.contains(selectedProjectID) { return }
+            selectedProjectID = ids.first
+        }
+        .accessibilityIdentifier("projects.page")
     }
 
-    private var projectHeader: some View {
-        HStack {
-            Text("名称")
-            Spacer()
-            Text("模型")
-                .frame(width: 150, alignment: .leading)
-            Text("活跃时长")
-                .frame(width: 100, alignment: .trailing)
-            Text("会话")
-                .frame(width: 54, alignment: .trailing)
-            Text("Tokens")
-                .frame(width: 90, alignment: .trailing)
+    private var pageHeader: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 18) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("项目")
+                    .font(.title2.weight(.semibold))
+                Text("本地 Codex 活动")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 24)
+
+            summaryValue(filteredProjects.count.formatted(), label: "个项目")
+            summaryDivider
+            summaryValue(PulseFormatters.tokens(visibleTokens), label: "Tokens")
+            summaryDivider
+            summaryValue(PulseFormatters.duration(visibleActiveDuration), label: "活跃")
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+    }
+
+    private func summaryValue(_ value: String, label: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text(value)
+                .font(.callout.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.primary)
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var summaryDivider: some View {
+        Circle()
+            .fill(.tertiary)
+            .frame(width: 3, height: 3)
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var projectList: some View {
+        if filteredProjects.isEmpty {
+            ContentUnavailableView.search(text: searchText)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            Table(filteredProjects, selection: $selectedProjectID) {
+                TableColumn("项目") { project in
+                    ProjectNameCell(project: project)
+                        .accessibilityIdentifier("project.\(project.id)")
+                }
+                .width(min: 180, ideal: 260)
+
+                TableColumn("模型") { project in
+                    ProjectModelsCell(models: project.models)
+                }
+                .width(min: 120, ideal: 160, max: 220)
+
+                TableColumn("活跃时长") { project in
+                    Text(PulseFormatters.duration(project.activeDuration))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                .width(min: 86, ideal: 104, max: 120)
+
+                TableColumn("会话") { project in
+                    Text(project.sessions.formatted())
+                        .monospacedDigit()
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .width(min: 50, ideal: 58, max: 68)
+
+                TableColumn("Tokens") { project in
+                    Text(PulseFormatters.tokens(project.tokens))
+                        .monospacedDigit()
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .width(min: 70, ideal: 82, max: 96)
+            }
+            .tableStyle(.inset(alternatesRowBackgrounds: false))
+            .accessibilityIdentifier("projects.table")
+        }
+    }
+}
+
+private struct ProjectNameCell: View {
+    let project: DashboardProject
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: project.isActive ? "terminal.fill" : "folder")
+                .foregroundStyle(project.isActive ? PulseTheme.mint : .secondary)
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(project.name)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+
+                if let lastActiveAt = project.lastActiveAt {
+                    Text(PulseFormatters.relative(lastActiveAt))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(project.name)
+        .accessibilityValue(project.isActive ? "当前活跃" : "未活跃")
+    }
+}
+
+private struct ProjectModelsCell: View {
+    let models: [String]
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(models.first ?? "—")
+                .lineLimit(1)
+            if models.count > 1 {
+                Text("+\(models.count - 1)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
         }
         .font(.caption)
         .foregroundStyle(.secondary)
-        .padding(16)
-    }
-
-    private func projectButton(_ project: DashboardProject) -> some View {
-        Button {
-            selectedProjectID = project.id
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: project.isActive ? "terminal.fill" : "folder")
-                    .foregroundStyle(project.isActive ? PulseTheme.mint : .secondary)
-                    .frame(width: 22)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(project.name)
-                        .font(.callout.weight(.medium))
-                        .lineLimit(1)
-                    if let lastActiveAt = project.lastActiveAt {
-                        Text("更新于 \(PulseFormatters.relative(lastActiveAt))")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Spacer()
-                Text(project.models.first ?? "—")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .frame(width: 150, alignment: .leading)
-                Text(PulseFormatters.duration(project.activeDuration))
-                    .font(.caption.monospacedDigit())
-                    .frame(width: 100, alignment: .trailing)
-                Text(project.sessions.formatted())
-                    .font(.caption.monospacedDigit())
-                    .frame(width: 54, alignment: .trailing)
-                Text(PulseFormatters.tokens(project.tokens))
-                    .font(.caption.monospacedDigit())
-                    .frame(width: 90, alignment: .trailing)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(
-                selectedProject?.id == project.id ? Color.accentColor.opacity(0.14) : Color.clear
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("project.\(project.name)")
-    }
-
-    private func summaryBadge(_ value: String, label: String) -> some View {
-        VStack(alignment: .trailing, spacing: 2) {
-            Text(value)
-                .font(.headline.monospacedDigit())
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("模型")
+        .accessibilityValue(models.isEmpty ? "无" : models.joined(separator: "、"))
     }
 }
 
 private struct ProjectInspector: View {
     let project: DashboardProject?
+    var compact = false
 
     var body: some View {
-        PulsePanel {
+        Group {
             if let project {
-                VStack(alignment: .leading, spacing: 18) {
-                    HStack {
-                        Image(systemName: "folder.fill")
-                            .foregroundStyle(PulseTheme.mint)
-                        Text(project.name)
-                            .font(.title3.weight(.semibold))
-                            .lineLimit(1)
-                        Spacer()
-                        if project.isActive {
-                            LiveStatusLabel(isLive: true, title: "活跃")
+                ScrollView {
+                    VStack(alignment: .leading, spacing: compact ? 14 : 20) {
+                        identity(project)
+                        Divider()
+                        metrics(project)
+                        Divider()
+                        tokenSection(project)
+
+                        if !project.models.isEmpty {
+                            Divider()
+                            modelsSection(project.models)
                         }
                     }
-
-                    Divider()
-
-                    inspectorMetric("Tokens", PulseFormatters.tokens(project.tokens), icon: "number")
-                    inspectorMetric("活跃时长", PulseFormatters.duration(project.activeDuration), icon: "clock")
-                    inspectorMetric("会话", project.sessions.formatted(), icon: "text.bubble")
-
-                    Divider()
-
-                    Text("Token 构成")
-                        .font(.headline)
-                    TokenBreakdownBar(project: project)
-
-                    if !project.models.isEmpty {
-                        Text("使用模型")
-                            .font(.headline)
-                        FlowLayout(spacing: 6) {
-                            ForEach(project.models, id: \.self) { model in
-                                Text(model)
-                                    .font(.caption)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(PulseTheme.panelHighlight, in: Capsule())
-                            }
-                        }
-                    }
-
-                    Spacer()
+                    .padding(compact ? 16 : 20)
                 }
-                .padding(18)
             } else {
-                ContentUnavailableView("选择一个项目", systemImage: "folder")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ContentUnavailableView(
+                    "选择一个项目",
+                    systemImage: "folder",
+                    description: Text("从列表中选择项目以查看用量明细")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.22))
+        .accessibilityIdentifier("projects.inspector")
+    }
+
+    private func identity(_ project: DashboardProject) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 9) {
+                Image(systemName: project.isActive ? "terminal.fill" : "folder.fill")
+                    .foregroundStyle(project.isActive ? PulseTheme.mint : .secondary)
+                Text(project.name)
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(2)
+                Spacer(minLength: 8)
+            }
+
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(project.isActive ? PulseTheme.mint : Color.secondary.opacity(0.6))
+                    .frame(width: 6, height: 6)
+                Text(project.isActive ? "当前活跃" : lastActivity(project.lastActiveAt))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    private func metrics(_ project: DashboardProject) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 11) {
+            metricRow("Tokens", PulseFormatters.tokens(project.tokens))
+            metricRow("活跃时长", PulseFormatters.duration(project.activeDuration))
+            metricRow("会话", project.sessions.formatted())
+        }
+    }
+
+    private func metricRow(_ title: String, _ value: String) -> some View {
+        GridRow {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .fontWeight(.semibold)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .font(.callout)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func tokenSection(_ project: DashboardProject) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Text("Token 构成")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            TokenBreakdownBar(project: project)
+        }
+    }
+
+    private func modelsSection(_ models: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("使用模型")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            FlowLayout(spacing: 6) {
+                ForEach(models, id: \.self) { model in
+                    Text(model)
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.quaternary, in: Capsule())
+                }
             }
         }
     }
 
-    private func inspectorMetric(_ title: String, _ value: String, icon: String) -> some View {
-        HStack {
-            Label(title, systemImage: icon)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(value)
-                .font(.callout.weight(.semibold).monospacedDigit())
-        }
+    private func lastActivity(_ date: Date?) -> String {
+        guard let date else { return "暂无活动时间" }
+        return "上次活跃 \(PulseFormatters.relative(date))"
     }
 }
 
 private struct TokenBreakdownBar: View {
+    private struct Part: Identifiable {
+        let title: String
+        let value: Int
+        let color: Color
+        var id: String { title }
+    }
+
     let project: DashboardProject
 
-    private var parts: [(String, Int, Color)] {
+    private var parts: [Part] {
         [
-            ("输入", project.inputTokens, PulseTheme.cyan),
-            ("缓存命中", project.cachedTokens, PulseTheme.violet),
-            ("输出", project.outputTokens, PulseTheme.mint),
-            ("推理", project.reasoningTokens, PulseTheme.amber)
+            Part(
+                title: "输入",
+                value: max(0, project.inputTokens - project.cachedTokens),
+                color: PulseTheme.cyan
+            ),
+            Part(title: "缓存命中", value: project.cachedTokens, color: PulseTheme.violet),
+            Part(
+                title: "输出",
+                value: max(0, project.outputTokens - project.reasoningTokens),
+                color: PulseTheme.mint
+            ),
+            Part(title: "推理", value: project.reasoningTokens, color: PulseTheme.amber)
         ]
     }
 
-    private var total: Int { max(parts.reduce(0) { $0 + $1.1 }, 1) }
+    private var positiveParts: [Part] {
+        parts.filter { $0.value > 0 }
+    }
+
+    private var total: Int {
+        positiveParts.reduce(0) { $0 + $1.value }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             GeometryReader { proxy in
-                HStack(spacing: 2) {
-                    ForEach(parts, id: \.0) { part in
-                        Rectangle()
-                            .fill(part.2)
-                            .frame(width: max(2, proxy.size.width * Double(part.1) / Double(total)))
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(.quaternary)
+
+                    if total > 0 {
+                        let spacing = CGFloat(max(positiveParts.count - 1, 0))
+                        let usableWidth = max(proxy.size.width - spacing, 0)
+
+                        HStack(spacing: 1) {
+                            ForEach(positiveParts) { part in
+                                Rectangle()
+                                    .fill(part.color)
+                                    .frame(
+                                        width: usableWidth * CGFloat(part.value) / CGFloat(total)
+                                    )
+                            }
+                        }
+                        .clipShape(Capsule())
                     }
                 }
-                .clipShape(Capsule())
             }
-            .frame(height: 8)
+            .frame(height: 7)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Token 构成")
+            .accessibilityValue(parts.map { "\($0.title) \(PulseFormatters.tokens($0.value))" }.joined(separator: "，"))
 
-            ForEach(parts, id: \.0) { part in
-                HStack {
-                    Circle().fill(part.2).frame(width: 7, height: 7)
-                    Text(part.0).foregroundStyle(.secondary)
+            ForEach(parts) { part in
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(part.color)
+                        .frame(width: 6, height: 6)
+                    Text(part.title)
+                        .foregroundStyle(.secondary)
                     Spacer()
-                    Text(PulseFormatters.tokens(part.1)).monospacedDigit()
+                    Text(PulseFormatters.tokens(part.value))
+                        .monospacedDigit()
                 }
                 .font(.caption)
+                .accessibilityElement(children: .combine)
             }
         }
     }
@@ -273,7 +410,12 @@ private struct FlowLayout: Layout {
         return CGSize(width: width.isFinite ? width : x, height: y + rowHeight)
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
         var x = bounds.minX
         var y = bounds.minY
         var rowHeight: CGFloat = 0

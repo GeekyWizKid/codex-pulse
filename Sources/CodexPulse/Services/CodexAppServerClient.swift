@@ -180,15 +180,63 @@ public struct DefaultCodexExecutableResolver: CodexExecutableResolving {
             let resolved = candidate.standardizedFileURL.resolvingSymlinksInPath()
             guard visited.insert(resolved.path).inserted else { continue }
 
-            var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: resolved.path, isDirectory: &isDirectory),
-                  !isDirectory.boolValue,
-                  FileManager.default.isExecutableFile(atPath: resolved.path)
-            else { continue }
+            guard isExecutableFile(resolved) else { continue }
+
+            // The npm launcher is a `#!/usr/bin/env node` script. Apps opened
+            // from Finder inherit a minimal PATH, so that launcher can be found
+            // while its Node interpreter cannot. Prefer the native binary that
+            // ships in the same Codex package; it is also what the launcher
+            // ultimately executes.
+            if let nativeExecutable = packagedNativeExecutable(backing: resolved) {
+                return nativeExecutable
+            }
             return resolved
         }
 
         throw CodexAppServerClientError.executableNotFound
+    }
+
+    private func packagedNativeExecutable(backing executable: URL) -> URL? {
+        guard executable.lastPathComponent == "codex.js",
+              executable.deletingLastPathComponent().lastPathComponent == "bin"
+        else { return nil }
+
+        let packageRoot = executable
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+
+        #if arch(arm64)
+        let packageName = "codex-darwin-arm64"
+        let targetTriple = "aarch64-apple-darwin"
+        #elseif arch(x86_64)
+        let packageName = "codex-darwin-x64"
+        let targetTriple = "x86_64-apple-darwin"
+        #else
+        return nil
+        #endif
+
+        let relativeBinary = "vendor/\(targetTriple)/bin/codex"
+        let candidates = [
+            packageRoot
+                .appendingPathComponent("node_modules/@openai/\(packageName)")
+                .appendingPathComponent(relativeBinary),
+            packageRoot
+                .deletingLastPathComponent()
+                .appendingPathComponent(packageName)
+                .appendingPathComponent(relativeBinary),
+            packageRoot.appendingPathComponent(relativeBinary)
+        ]
+
+        return candidates
+            .map { $0.standardizedFileURL.resolvingSymlinksInPath() }
+            .first(where: isExecutableFile)
+    }
+
+    private func isExecutableFile(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            && !isDirectory.boolValue
+            && FileManager.default.isExecutableFile(atPath: url.path)
     }
 }
 

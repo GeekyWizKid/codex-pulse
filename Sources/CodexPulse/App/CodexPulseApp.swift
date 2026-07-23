@@ -23,7 +23,7 @@ struct CodexPulseApp: App {
         }
         .defaultSize(width: 1_380, height: 900)
         .windowResizability(.contentMinSize)
-        .windowToolbarStyle(.unified(showsTitle: false))
+        .windowToolbarStyle(.unified(showsTitle: true))
         .commands {
             CommandMenu("监控") {
                 Button("刷新全部") {

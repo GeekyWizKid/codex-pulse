@@ -68,6 +68,23 @@ struct DailyUsagePoint: Identifiable, Hashable {
     var id: Date { date }
 }
 
+struct QuotaRunwayPoint: Identifiable, Hashable {
+    let date: Date
+    let percent: Double
+
+    var id: Date { date }
+}
+
+struct QuotaRunwaySnapshot: Hashable {
+    let startAt: Date
+    let observedAt: Date
+    let resetAt: Date
+    let usedPercent: Double
+    let forecastPercent: Double
+    let idealPercent: Double
+    let actual: [QuotaRunwayPoint]
+}
+
 enum LoadStatus: Equatable {
     case idle
     case loading(String)
@@ -85,6 +102,17 @@ enum LoadStatus: Equatable {
         case .loading(let message): message
         case .ready: "实时"
         case .degraded(let message, _): message
+        }
+    }
+
+    var updatedAt: Date? {
+        switch self {
+        case .ready(let date):
+            date
+        case .degraded(_, let date):
+            date
+        case .idle, .loading:
+            nil
         }
     }
 }

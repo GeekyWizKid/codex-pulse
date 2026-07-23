@@ -83,6 +83,17 @@ final class AppStore: ObservableObject {
         return usage.activeDuration / Double(usage.sessions)
     }
 
+    var todayTokens: Int {
+        guard let localSnapshot else { return range == .today ? usage.tokens : 0 }
+        let start = Calendar.current.startOfDay(for: Date())
+        let total = localSnapshot.hourlyUsage
+            .filter { $0.date >= start && $0.date <= Date() }
+            .reduce(Int64(0)) { partial, bucket in
+                Self.saturatedAdd(partial, bucket.tokens.total)
+            }
+        return Self.clampedInt(total)
+    }
+
     var dailyUsage: [DailyUsagePoint] {
         guard let localSnapshot else { return [] }
         return localSnapshot.dailyUsage
@@ -132,6 +143,85 @@ final class AppStore: ObservableObject {
             return "Codex Pulse"
         }
         return "Codex \(Int(remaining.rounded()))%"
+    }
+
+    func quotaRunway(for quota: DashboardQuota, now: Date = Date()) -> QuotaRunwaySnapshot? {
+        guard let rawUsedPercent = quota.usedPercent,
+              let windowMinutes = quota.windowMinutes,
+              windowMinutes > 0,
+              let resetAt = quota.resetAt,
+              resetAt > now else {
+            return nil
+        }
+
+        let duration = TimeInterval(windowMinutes) * 60
+        let startAt = resetAt.addingTimeInterval(-duration)
+        let observedAt = min(max(now, startAt), resetAt)
+        let usedPercent = min(100, max(0, rawUsedPercent))
+        let source: [(date: Date, tokens: Int64)]
+
+        if duration <= 8 * 86_400 {
+            source = localSnapshot?.hourlyUsage
+                .filter { $0.date >= startAt && $0.date <= observedAt }
+                .map {
+                    (
+                        min(Calendar.current.date(byAdding: .hour, value: 1, to: $0.date) ?? $0.date, observedAt),
+                        $0.tokens.total
+                    )
+                } ?? []
+        } else {
+            source = localSnapshot?.dailyUsage
+                .filter { $0.date >= startAt && $0.date <= observedAt }
+                .map {
+                    (
+                        min(Calendar.current.date(byAdding: .day, value: 1, to: $0.date) ?? $0.date, observedAt),
+                        $0.tokens.total
+                    )
+                } ?? []
+        }
+
+        let sorted = source.sorted { $0.date < $1.date }
+        let tokenTotal = sorted.reduce(Int64(0)) { partial, item in
+            Self.saturatedAdd(partial, max(0, item.tokens))
+        }
+        var cumulative: Int64 = 0
+        var actual = [QuotaRunwayPoint(date: startAt, percent: 0)]
+
+        if tokenTotal > 0 {
+            for item in sorted {
+                cumulative = Self.saturatedAdd(cumulative, max(0, item.tokens))
+                let point = QuotaRunwayPoint(
+                    date: max(item.date, startAt),
+                    percent: min(usedPercent, Double(cumulative) / Double(tokenTotal) * usedPercent)
+                )
+                if actual.last?.date == point.date {
+                    actual[actual.count - 1] = point
+                } else {
+                    actual.append(point)
+                }
+            }
+        }
+
+        let observedPoint = QuotaRunwayPoint(date: observedAt, percent: usedPercent)
+        if actual.last?.date == observedAt {
+            actual[actual.count - 1] = observedPoint
+        } else {
+            actual.append(observedPoint)
+        }
+
+        let elapsedFraction = min(1, max(0.01, observedAt.timeIntervalSince(startAt) / duration))
+        let forecastEnabled = UserDefaults.standard.object(forKey: "enableForecast") as? Bool ?? true
+        let projected = forecastEnabled ? usedPercent / elapsedFraction : usedPercent
+
+        return QuotaRunwaySnapshot(
+            startAt: startAt,
+            observedAt: observedAt,
+            resetAt: resetAt,
+            usedPercent: usedPercent,
+            forecastPercent: min(100, max(usedPercent, projected)),
+            idealPercent: 50,
+            actual: actual
+        )
     }
 
     func startMonitoringIfNeeded() async {
@@ -289,9 +379,9 @@ final class AppStore: ObservableObject {
                 DashboardModel(
                     model: row.model,
                     effort: row.effort.rawValue,
-                    liveIQ: row.liveIQ ?? 0,
-                    recentIQ: row.recentIQ ?? 0,
-                    longTermIQ: row.longTermIQ ?? 0,
+                    liveIQ: row.liveIQ ?? .nan,
+                    recentIQ: row.recentIQ ?? .nan,
+                    longTermIQ: row.longTermIQ ?? .nan,
                     coverage: row.coverage,
                     samples: row.recentSampleCount,
                     meanDuration: row.meanRecentDurationSeconds,

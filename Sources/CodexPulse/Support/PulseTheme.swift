@@ -1,17 +1,23 @@
 import SwiftUI
 
 enum PulseTheme {
-    static let background = Color(red: 0.035, green: 0.055, blue: 0.075)
-    static let detailBackground = Color(red: 0.045, green: 0.070, blue: 0.092)
-    static let panel = Color(red: 0.075, green: 0.105, blue: 0.130)
-    static let panelHighlight = Color(red: 0.095, green: 0.130, blue: 0.155)
-    static let border = Color.white.opacity(0.10)
-    static let grid = Color.white.opacity(0.075)
-    static let mint = Color(red: 0.18, green: 0.88, blue: 0.70)
-    static let cyan = Color(red: 0.26, green: 0.64, blue: 1.0)
-    static let violet = Color(red: 0.62, green: 0.45, blue: 0.98)
-    static let amber = Color(red: 1.0, green: 0.76, blue: 0.12)
-    static let danger = Color(red: 1.0, green: 0.34, blue: 0.34)
+    // Graphite Instrument: a quiet system-first palette with one blue accent.
+    static let background = Color(red: 0.055, green: 0.063, blue: 0.073)
+    static let detailBackground = Color(red: 0.065, green: 0.073, blue: 0.083)
+    static let panel = Color.white.opacity(0.035)
+    static let panelHighlight = Color.white.opacity(0.065)
+    static let border = Color.white.opacity(0.12)
+    static let grid = Color.white.opacity(0.085)
+    static let accent = Color(red: 0.25, green: 0.53, blue: 1.0)
+    static let success = Color(red: 0.18, green: 0.78, blue: 0.48)
+    static let warning = Color(red: 0.96, green: 0.66, blue: 0.18)
+    static let danger = Color(red: 0.96, green: 0.35, blue: 0.33)
+
+    // Compatibility aliases for the few legacy components that remain available.
+    static let mint = success
+    static let cyan = accent
+    static let violet = Color(red: 0.58, green: 0.48, blue: 0.96)
+    static let amber = warning
 }
 
 struct PulsePanel<Content: View>: View {
@@ -23,7 +29,7 @@ struct PulsePanel<Content: View>: View {
 
     var body: some View {
         content
-            .background(PulseTheme.panel.opacity(0.88), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(PulseTheme.panel, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .stroke(PulseTheme.border, lineWidth: 1)
@@ -38,11 +44,11 @@ struct LiveStatusLabel: View {
     var body: some View {
         HStack(spacing: 7) {
             Circle()
-                .fill(isLive ? PulseTheme.mint : PulseTheme.amber)
+                .fill(isLive ? PulseTheme.success : PulseTheme.warning)
                 .frame(width: 7, height: 7)
             Text(title)
                 .font(.callout.weight(.medium))
-                .foregroundStyle(isLive ? PulseTheme.mint : .secondary)
+                .foregroundStyle(isLive ? PulseTheme.success : .secondary)
         }
         .accessibilityElement(children: .combine)
     }
