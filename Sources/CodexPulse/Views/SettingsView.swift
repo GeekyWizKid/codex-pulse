@@ -96,7 +96,7 @@ struct SettingsView: View {
         Form {
             Section {
                 LabeledContent {
-                    Text("版本 1.0.0")
+                    Text(versionLabel)
                         .foregroundStyle(.secondary)
                 } label: {
                     Label {
@@ -126,5 +126,18 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private var versionLabel: String {
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "开发版"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+
+        guard let build, !build.isEmpty else {
+            return "版本 \(version)"
+        }
+
+        return "版本 \(version) (\(build))"
     }
 }
