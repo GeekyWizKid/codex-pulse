@@ -1,5 +1,7 @@
+import AppKit
 import Combine
 import Foundation
+import Security
 
 // MARK: - Dependency-injectable protocol primitives
 
@@ -140,15 +142,37 @@ public struct DefaultCodexExecutableResolver: CodexExecutableResolving {
     private let explicitURL: URL?
     private let environment: [String: String]
     private let homeDirectory: URL
+    private let applicationDirectories: [URL]
+    private let registeredApplicationURLs: [URL]
+    private let applicationValidator: @Sendable (URL) -> Bool
 
     public init(
         explicitURL: URL? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        applicationDirectories: [URL]? = nil,
+        registeredApplicationURLs: [URL]? = nil,
+        applicationValidator: (@Sendable (URL) -> Bool)? = nil
     ) {
         self.explicitURL = explicitURL
         self.environment = environment
         self.homeDirectory = homeDirectory
+        self.applicationDirectories = applicationDirectories ?? [
+            URL(fileURLWithPath: "/Applications", isDirectory: true),
+            homeDirectory.appendingPathComponent("Applications", isDirectory: true)
+        ]
+        if let registeredApplicationURLs {
+            self.registeredApplicationURLs = registeredApplicationURLs
+        } else if let registeredApplication = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.openai.codex"
+        ) {
+            self.registeredApplicationURLs = [registeredApplication]
+        } else {
+            self.registeredApplicationURLs = []
+        }
+        self.applicationValidator = applicationValidator ?? {
+            Self.isTrustedOpenAIApplication($0)
+        }
     }
 
     public func resolveCodexExecutable() throws -> URL {
@@ -176,6 +200,7 @@ public struct DefaultCodexExecutableResolver: CodexExecutableResolving {
         }
 
         var visited = Set<String>()
+        var deferredNodeLaunchers: [URL] = []
         for candidate in candidates {
             let resolved = candidate.standardizedFileURL.resolvingSymlinksInPath()
             guard visited.insert(resolved.path).inserted else { continue }
@@ -190,7 +215,61 @@ public struct DefaultCodexExecutableResolver: CodexExecutableResolving {
             if let nativeExecutable = packagedNativeExecutable(backing: resolved) {
                 return nativeExecutable
             }
+
+            // A JavaScript launcher is the least reliable choice for a GUI app:
+            // even a visible Node executable can still be broken or mismatched.
+            // Keep it only as the final fallback after all native candidates.
+            if resolved.pathExtension == "js" {
+                if environmentCanRunNode() {
+                    deferredNodeLaunchers.append(resolved)
+                }
+                continue
+            }
+
             return resolved
+        }
+
+        // A package manager can leave the native optional dependency installed
+        // while its public bin symlink is temporarily absent during an update.
+        // Search those native package locations directly instead of depending
+        // on the launcher as the only route into the package.
+        for candidate in directNativeExecutableCandidates() {
+            let resolved = candidate.standardizedFileURL.resolvingSymlinksInPath()
+            guard visited.insert(resolved.path).inserted else { continue }
+            if isExecutableFile(resolved) {
+                return resolved
+            }
+        }
+
+        // ChatGPT includes a native Codex executable. Only use it after the
+        // containing application passes strict code-signature validation for
+        // OpenAI's bundle identifier and Team ID.
+        for candidate in bundledApplicationCandidates() {
+            let application = candidate
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+            guard applicationValidator(application) else { continue }
+
+            let resources = application
+                .appendingPathComponent("Contents/Resources", isDirectory: true)
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+            let applicationPrefix = application.path + "/"
+            let executable = resources
+                .appendingPathComponent("codex")
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+            guard resources.path.hasPrefix(applicationPrefix),
+                  executable.path.hasPrefix(resources.path + "/"),
+                  visited.insert(executable.path).inserted,
+                  isExecutableFile(executable)
+            else { continue }
+
+            return executable
+        }
+
+        if let nodeLauncher = deferredNodeLaunchers.first {
+            return nodeLauncher
         }
 
         throw CodexAppServerClientError.executableNotFound
@@ -198,38 +277,155 @@ public struct DefaultCodexExecutableResolver: CodexExecutableResolving {
 
     private func packagedNativeExecutable(backing executable: URL) -> URL? {
         guard executable.lastPathComponent == "codex.js",
-              executable.deletingLastPathComponent().lastPathComponent == "bin"
+              executable.deletingLastPathComponent().lastPathComponent == "bin",
+              let nativePlatform
         else { return nil }
 
         let packageRoot = executable
             .deletingLastPathComponent()
             .deletingLastPathComponent()
 
-        #if arch(arm64)
-        let packageName = "codex-darwin-arm64"
-        let targetTriple = "aarch64-apple-darwin"
-        #elseif arch(x86_64)
-        let packageName = "codex-darwin-x64"
-        let targetTriple = "x86_64-apple-darwin"
-        #else
-        return nil
-        #endif
+        return packagedNativeCandidates(
+            packageRoot: packageRoot,
+            platform: nativePlatform
+        )
+        .map { $0.standardizedFileURL.resolvingSymlinksInPath() }
+        .first(where: isExecutableFile)
+    }
 
-        let relativeBinary = "vendor/\(targetTriple)/bin/codex"
-        let candidates = [
+    private func directNativeExecutableCandidates() -> [URL] {
+        guard let nativePlatform else { return [] }
+
+        var packageRoots = [
+            homeDirectory.appendingPathComponent(
+                ".npm-global/lib/node_modules/@openai/codex",
+                isDirectory: true
+            ),
+            homeDirectory.appendingPathComponent(
+                ".local/lib/node_modules/@openai/codex",
+                isDirectory: true
+            ),
+            URL(
+                fileURLWithPath: "/opt/homebrew/lib/node_modules/@openai/codex",
+                isDirectory: true
+            ),
+            URL(
+                fileURLWithPath: "/usr/local/lib/node_modules/@openai/codex",
+                isDirectory: true
+            )
+        ]
+
+        for variable in ["npm_config_prefix", "NPM_CONFIG_PREFIX"] {
+            guard let prefix = environment[variable], prefix.hasPrefix("/") else { continue }
+            packageRoots.append(
+                URL(fileURLWithPath: prefix, isDirectory: true)
+                    .appendingPathComponent("lib/node_modules/@openai/codex", isDirectory: true)
+            )
+        }
+
+        for pathEntry in environment["PATH", default: ""].split(separator: ":") {
+            let directory = String(pathEntry)
+            guard directory.hasPrefix("/") else { continue }
+            let prefix = URL(fileURLWithPath: directory, isDirectory: true)
+                .deletingLastPathComponent()
+            packageRoots.append(
+                prefix.appendingPathComponent(
+                    "lib/node_modules/@openai/codex",
+                    isDirectory: true
+                )
+            )
+        }
+
+        var visitedRoots = Set<String>()
+        return packageRoots
+            .map { $0.standardizedFileURL }
+            .filter { visitedRoots.insert($0.path).inserted }
+            .flatMap {
+                packagedNativeCandidates(packageRoot: $0, platform: nativePlatform)
+            }
+    }
+
+    private func bundledApplicationCandidates() -> [URL] {
+        registeredApplicationURLs + applicationDirectories.flatMap { directory in
+            ["ChatGPT.app", "Codex.app"].map { applicationName in
+                directory
+                    .appendingPathComponent(applicationName, isDirectory: true)
+            }
+        }
+    }
+
+    private static func isTrustedOpenAIApplication(_ applicationURL: URL) -> Bool {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(
+            applicationURL as CFURL,
+            SecCSFlags(),
+            &staticCode
+        ) == errSecSuccess,
+        let staticCode
+        else { return false }
+
+        let requirementText = """
+        anchor apple generic and identifier "com.openai.codex" \
+        and certificate leaf[subject.OU] = "2DC432GLL2"
+        """
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(
+            requirementText as CFString,
+            SecCSFlags(),
+            &requirement
+        ) == errSecSuccess,
+        let requirement
+        else { return false }
+
+        let validationFlags = SecCSFlags(
+            rawValue: kSecCSCheckAllArchitectures
+                | kSecCSCheckNestedCode
+                | kSecCSStrictValidate
+        )
+        return SecStaticCodeCheckValidity(
+            staticCode,
+            validationFlags,
+            requirement
+        ) == errSecSuccess
+    }
+
+    private func packagedNativeCandidates(
+        packageRoot: URL,
+        platform: (packageName: String, targetTriple: String)
+    ) -> [URL] {
+        let relativeBinary = "vendor/\(platform.targetTriple)/bin/codex"
+        return [
             packageRoot
-                .appendingPathComponent("node_modules/@openai/\(packageName)")
+                .appendingPathComponent("node_modules/@openai/\(platform.packageName)")
                 .appendingPathComponent(relativeBinary),
             packageRoot
                 .deletingLastPathComponent()
-                .appendingPathComponent(packageName)
+                .appendingPathComponent(platform.packageName)
                 .appendingPathComponent(relativeBinary),
             packageRoot.appendingPathComponent(relativeBinary)
         ]
+    }
 
-        return candidates
-            .map { $0.standardizedFileURL.resolvingSymlinksInPath() }
-            .first(where: isExecutableFile)
+    private var nativePlatform: (packageName: String, targetTriple: String)? {
+        #if arch(arm64)
+        return ("codex-darwin-arm64", "aarch64-apple-darwin")
+        #elseif arch(x86_64)
+        return ("codex-darwin-x64", "x86_64-apple-darwin")
+        #else
+        return nil
+        #endif
+    }
+
+    private func environmentCanRunNode() -> Bool {
+        environment["PATH", default: ""]
+            .split(separator: ":")
+            .map(String.init)
+            .filter { $0.hasPrefix("/") }
+            .map {
+                URL(fileURLWithPath: $0, isDirectory: true)
+                    .appendingPathComponent("node")
+            }
+            .contains(where: isExecutableFile)
     }
 
     private func isExecutableFile(_ url: URL) -> Bool {
@@ -544,7 +740,10 @@ public final class CodexAppServerClient: ObservableObject {
         lastError = nil
 
         do {
-            let executableURL = try executableResolver.resolveCodexExecutable()
+            let resolver = executableResolver
+            let executableURL = try await Task.detached(priority: .userInitiated) {
+                try resolver.resolveCodexExecutable()
+            }.value
             let newTransport = transportFactory(executableURL)
             let generation = UUID()
             transport = newTransport
