@@ -54,7 +54,9 @@ final class CodexAppServerClientTests: XCTestCase {
 
         let resolver = DefaultCodexExecutableResolver(
             environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"],
-            homeDirectory: temporaryHome
+            homeDirectory: temporaryHome,
+            applicationDirectories: [],
+            registeredApplicationURLs: []
         )
 
         XCTAssertEqual(
@@ -63,7 +65,7 @@ final class CodexAppServerClientTests: XCTestCase {
         )
     }
 
-    func testResolverFallsBackToExecutableWhenNoPackagedNativeBinaryExists() throws {
+    func testResolverUsesNodeLauncherWhenNodeIsAvailable() throws {
         let fileManager = FileManager.default
         let temporaryHome = fileManager.temporaryDirectory
             .appendingPathComponent("CodexPulseResolverTests-\(UUID().uuidString)", isDirectory: true)
@@ -87,15 +89,243 @@ final class CodexAppServerClientTests: XCTestCase {
         )
         try fileManager.createSymbolicLink(at: launcher, withDestinationURL: nodeLauncher)
 
+        let runtimeBin = temporaryHome.appendingPathComponent("runtime/bin", isDirectory: true)
+        let node = runtimeBin.appendingPathComponent("node")
+        try fileManager.createDirectory(at: runtimeBin, withIntermediateDirectories: true)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: node)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: node.path)
+
         let resolver = DefaultCodexExecutableResolver(
-            environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"],
-            homeDirectory: temporaryHome
+            environment: ["PATH": runtimeBin.path],
+            homeDirectory: temporaryHome,
+            applicationDirectories: [],
+            registeredApplicationURLs: []
         )
 
         XCTAssertEqual(
             try resolver.resolveCodexExecutable(),
             nodeLauncher.standardizedFileURL.resolvingSymlinksInPath()
         )
+    }
+
+    func testResolverFindsPackagedNativeCodexWhenLauncherIsMissing() throws {
+        let fileManager = FileManager.default
+        let temporaryHome = fileManager.temporaryDirectory
+            .appendingPathComponent("CodexPulseResolverTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporaryHome) }
+
+        #if arch(arm64)
+        let packageName = "codex-darwin-arm64"
+        let targetTriple = "aarch64-apple-darwin"
+        #elseif arch(x86_64)
+        let packageName = "codex-darwin-x64"
+        let targetTriple = "x86_64-apple-darwin"
+        #else
+        throw XCTSkip("Codex currently ships native macOS packages for arm64 and x86_64")
+        #endif
+
+        let nativeExecutable = temporaryHome
+            .appendingPathComponent(
+                ".npm-global/lib/node_modules/@openai/codex/node_modules/@openai/\(packageName)"
+            )
+            .appendingPathComponent("vendor/\(targetTriple)/bin/codex")
+        try fileManager.createDirectory(
+            at: nativeExecutable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: nativeExecutable)
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: nativeExecutable.path
+        )
+
+        let resolver = DefaultCodexExecutableResolver(
+            environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"],
+            homeDirectory: temporaryHome,
+            applicationDirectories: [],
+            registeredApplicationURLs: []
+        )
+
+        XCTAssertEqual(
+            try resolver.resolveCodexExecutable(),
+            nativeExecutable.standardizedFileURL.resolvingSymlinksInPath()
+        )
+    }
+
+    func testResolverPrefersTrustedBundledCodexOverNodeLauncher() throws {
+        let fileManager = FileManager.default
+        let temporaryHome = fileManager.temporaryDirectory
+            .appendingPathComponent("CodexPulseResolverTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporaryHome) }
+
+        let launcher = temporaryHome.appendingPathComponent(".npm-global/bin/codex")
+        let nodeLauncher = temporaryHome
+            .appendingPathComponent(".npm-global/lib/node_modules/@openai/codex/bin/codex.js")
+        try fileManager.createDirectory(
+            at: launcher.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: nodeLauncher.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/usr/bin/env node\n".utf8).write(to: nodeLauncher)
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: nodeLauncher.path
+        )
+        try fileManager.createSymbolicLink(at: launcher, withDestinationURL: nodeLauncher)
+
+        let runtimeBin = temporaryHome.appendingPathComponent("runtime/bin", isDirectory: true)
+        let node = runtimeBin.appendingPathComponent("node")
+        try fileManager.createDirectory(at: runtimeBin, withIntermediateDirectories: true)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: node)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: node.path)
+
+        let applications = temporaryHome.appendingPathComponent("Applications", isDirectory: true)
+        let bundledCodex = applications
+            .appendingPathComponent("ChatGPT.app/Contents/Resources/codex")
+        try fileManager.createDirectory(
+            at: bundledCodex.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: bundledCodex)
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: bundledCodex.path
+        )
+
+        let resolver = DefaultCodexExecutableResolver(
+            environment: ["PATH": runtimeBin.path],
+            homeDirectory: temporaryHome,
+            applicationDirectories: [],
+            registeredApplicationURLs: [
+                applications.appendingPathComponent("ChatGPT.app", isDirectory: true)
+            ],
+            applicationValidator: { _ in true }
+        )
+
+        XCTAssertEqual(
+            try resolver.resolveCodexExecutable(),
+            bundledCodex.standardizedFileURL.resolvingSymlinksInPath()
+        )
+    }
+
+    func testResolverRejectsUnsignedBundledCodex() throws {
+        let fileManager = FileManager.default
+        let temporaryHome = fileManager.temporaryDirectory
+            .appendingPathComponent("CodexPulseResolverTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporaryHome) }
+
+        let applications = temporaryHome.appendingPathComponent("Applications", isDirectory: true)
+        let bundledCodex = applications
+            .appendingPathComponent("ChatGPT.app/Contents/Resources/codex")
+        try fileManager.createDirectory(
+            at: bundledCodex.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: bundledCodex)
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: bundledCodex.path
+        )
+
+        let resolver = DefaultCodexExecutableResolver(
+            environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"],
+            homeDirectory: temporaryHome,
+            applicationDirectories: [applications],
+            registeredApplicationURLs: []
+        )
+
+        XCTAssertThrowsError(try resolver.resolveCodexExecutable()) { error in
+            XCTAssertEqual(error as? CodexAppServerClientError, .executableNotFound)
+        }
+    }
+
+    func testResolverRejectsBundledExecutableSymlinkOutsideApplication() throws {
+        let fileManager = FileManager.default
+        let temporaryHome = fileManager.temporaryDirectory
+            .appendingPathComponent("CodexPulseResolverTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporaryHome) }
+
+        let applications = temporaryHome.appendingPathComponent("Applications", isDirectory: true)
+        let bundledCodex = applications
+            .appendingPathComponent("ChatGPT.app/Contents/Resources/codex")
+        let escapedExecutable = temporaryHome.appendingPathComponent("outside-codex")
+        try fileManager.createDirectory(
+            at: bundledCodex.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: escapedExecutable)
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: escapedExecutable.path
+        )
+        try fileManager.createSymbolicLink(
+            at: bundledCodex,
+            withDestinationURL: escapedExecutable
+        )
+
+        let resolver = DefaultCodexExecutableResolver(
+            environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"],
+            homeDirectory: temporaryHome,
+            applicationDirectories: [applications],
+            registeredApplicationURLs: [],
+            applicationValidator: { _ in true }
+        )
+
+        XCTAssertThrowsError(try resolver.resolveCodexExecutable()) { error in
+            XCTAssertEqual(error as? CodexAppServerClientError, .executableNotFound)
+        }
+    }
+
+    func testResolverRejectsBundledResourcesSymlinkOutsideApplication() throws {
+        let fileManager = FileManager.default
+        let temporaryHome = fileManager.temporaryDirectory
+            .appendingPathComponent("CodexPulseResolverTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: temporaryHome) }
+
+        let applications = temporaryHome.appendingPathComponent("Applications", isDirectory: true)
+        let applicationContents = applications
+            .appendingPathComponent("ChatGPT.app/Contents", isDirectory: true)
+        let bundledResources = applicationContents.appendingPathComponent(
+            "Resources",
+            isDirectory: true
+        )
+        let escapedResources = temporaryHome.appendingPathComponent(
+            "outside-resources",
+            isDirectory: true
+        )
+        let escapedExecutable = escapedResources.appendingPathComponent("codex")
+        try fileManager.createDirectory(
+            at: applicationContents,
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: escapedResources,
+            withIntermediateDirectories: true
+        )
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: escapedExecutable)
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: escapedExecutable.path
+        )
+        try fileManager.createSymbolicLink(
+            at: bundledResources,
+            withDestinationURL: escapedResources
+        )
+
+        let resolver = DefaultCodexExecutableResolver(
+            environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"],
+            homeDirectory: temporaryHome,
+            applicationDirectories: [applications],
+            registeredApplicationURLs: [],
+            applicationValidator: { _ in true }
+        )
+
+        XCTAssertThrowsError(try resolver.resolveCodexExecutable()) { error in
+            XCTAssertEqual(error as? CodexAppServerClientError, .executableNotFound)
+        }
     }
 
     @MainActor
